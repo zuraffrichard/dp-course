@@ -1,0 +1,679 @@
+= Lab 02 Infrastructure as Code: Packer,  Terraform, and Ansible
+
+Return to the Google Cloud Shell and your downloaded Github repository. 
+
+Check out the branch for this lab: 
+
+[source,bash]
+----
+$ git checkout 02
+----
+
+== Packer
+
+Scripts helped us speed up the process of system configuration, and made it more reliable compared to doing everything manually, but there are still ways for improvement.
+
+In this lab, we're going to take a look at the first IaC tool in this tutorial called https://www.packer.io/[Packer] and see how it can help us improve our operations.
+
+=== Intro
+
+Remember how in the second lab we had to make install nodejs, npm, and even git on the VM so that we could clone the application repo? Did it surprise you that `git` was not already installed on the system?
+
+Imagine how nice it would be to have required packages like nodejs and npm preinstalled on the VM we provision, or have necessary configuration files come with the image, too.
+This would require even less time and effort from us to configure the system and run our application.
+
+Luckily, we can create custom machine images with required configuration and software installed using Packer, an IaC tool by Hashicorp.
+
+NOTE: As you work with various cloud providers, you will encounter "machine images." On Amazon, they are called "AMIs," for Amazon Machine Images. Packer provides a generalized way of creating such images for any Cloud provider.
+
+Let's check it out.
+
+=== Install Packer
+
+Review the `install-packer.sh` script and run it. 
+
+Check the version to verify that it was installed:
+
+[source,bash]
+----
+$ ~/bin/packer -v
+----
+
+NOTE: If your Google Cloud Shell goes to sleep before you complete this lab you will need to re-install Packer. We won't be using it much after this lab, so this is not an issue. Try to complete the Packer section in one sitting. 
+
+=== Define image builder
+
+The way Packer works is simple. It starts a VM with specified characteristics, configures the operating system and installs the software you specify, and then it creates a machine image from that VM.
+
+The part of packer responsible for starting a VM and creating an image from it is called https://www.packer.io/docs/builders/index.html[builder].
+
+So before using packer to create images, we need to define a builder configuration in a JSON file (which is called *template* in Packer terminology).
+
+Review the `node-svc-base-image.json` file inside the repo with the following content (make sure to change the project ID, and also the zone in case it's different):
+
+[source,json]
+----
+{
+  "builders": [
+    {
+      "type": "googlecompute",
+      "project_id": "YOUR PROJECT HERE. YOU MUST CHANGE THIS",
+      "zone": "us-central1-c",
+      "machine_type": "f1-micro",
+      "source_image_family": "ubuntu-minimal-2004-lts",
+      "image_name": "node-svc-base-{{isotime \"2006-01-02 03:04:05\"}}",
+      "image_family": "node-svc-base",
+      "image_description": "Ubuntu 16.04 with git, nodejs, npm preinstalled",
+      "ssh_username": "node-user"
+    }
+  ]
+}
+----
+
+
+This template describes where and what type of a VM to launch for image creation (`type`, `project_id`, `zone`, `machine_type`, `source_image_family`). It also defines image saving configuration such as under which name (`image_name`) and image family (`image_family`) the resulting image should be saved and what description to give it (`image_description`). SSH user configuration is used by provisioners which will talk about later.
+
+Validate the template:
+
+[source,bash]
+----
+$ ~/bin/packer validate node-svc-base-image.json
+----
+
+=== Define image provisioner
+
+As we already mentioned, builders are only responsible for starting a VM and creating an image from that VM. The real work of system configuration and installing software on the running VM is done by another Packer component called *provisioner*.
+
+Review the https://www.packer.io/docs/provisioners/shell.html[shell provisioner] in your template that will run the `config.sh` script you worked with in the previous lab.
+
+Your template should look similar to this one:
+
+[source,json]
+----
+{
+  "builders": [
+    {
+      "type": "googlecompute",
+      "project_id": "YOUR PROJECT HERE. YOU MUST CHANGE THIS",
+      "zone": "us-central1-c",
+      "machine_type": "f1-micro",
+      "source_image_family": "ubuntu-1604-lts",
+      "image_name": "node-svc-base-{{isotime `20200901-000001`}}",
+      "image_family": "node-svc-base",
+      "image_description": "Ubuntu 16.04 with git, nodejs, npm, and node-svc preinstalled",
+      "ssh_username": "node-user"
+    }
+  ],
+  "provisioners": [
+      {
+          "type": "shell",
+          "script": "{{template_dir}}/../01/config.sh",
+          "execute_command": "sudo {{.Path}}"
+      }
+  ]
+}
+----
+
+Make sure the template is valid:
+
+[source,bash]
+----
+$ ~/bin/packer validate node-svc-base-image.json
+----
+
+Did you change the Github project?
+
+=== Create custom machine image
+
+Build the image for your application:
+
+[source,bash]
+----
+$ ~/bin/packer build node-svc-base-image.json
+[...lots of output]
+==> Builds finished. The artifacts of successful builds are:
+--> googlecompute: A disk image was created: node-svc-base-2020-09-05-19-12-17
+----
+
+If you go to the https://console.cloud.google.com/compute/images[Compute Engine Images] page you should see your new custom image.
+
+== Launch a VM with your custom built machine image
+
+Once the image is built, use it as a boot disk to start a VM:
+
+[source,bash]
+----
+$ gcloud compute instances create node-svc-01 \
+    --image-family node-svc-base \
+    --boot-disk-size 10GB \
+    --machine-type f1-micro
+----
+In the zone, boot-disk-size is different from each other. If you use zone as us-central1-c, you change boot-disk-size to 20GB. However, if you use zone as us-central1-a, you do not need to change boot-disk-size. The above instruction command works in us-central1-a. If you use us-central1-c zone, you need to change the following:
+[source,bash]
+----
+gcloud compute instances create node-svc-01 \
+    --image-family node-svc-base \
+    --boot-disk-size 20GB \
+    --machine-type f1-micro
+----
+
+
+=== Deploy Application
+
+NOTE: We will only deploy to one VM this time. 
+
+Inspect the file `install-node-svc.sh` (that is, `cat install-node-svc.sh`). What does it do? 
+
+Run it. You should see that it: 
+
+* Made a directory on your VM
+* Copied the application files
+* installed the app
+* ran it. 
+
+Connect to the VM via SSH:
+
+[source,bash]
+----
+$ ssh node-user@${NODE_IP_01}
+----
+NOTE: See the FAQ if you get `Offending ECDSA key` or `Permission denied (publickey).`
+
+Verify nodejs and npm are installed.
+Do you understand how they got there?
+(Your results may be slightly different, but if you get errors, investigate or ask for help):
+
+[source,bash]
+----
+node-user@node-svc:~$ npm -v
+6.14.4
+node-user@node-svc:~$ node -v
+v10.19.0
+----
+
+=== Access Application
+
+Back in Google Cloud Console, manually re-create the firewall rule:
+
+[source,bash]
+----
+$ gcloud compute firewall-rules create allow-node-svc-tcp-3000 \
+    --network default \
+    --action allow \
+    --direction ingress \
+    --rules tcp:3000 \
+    --source-ranges 0.0.0.0/0
+----
+
+Run the following command to get a public IP of the VM:
+
+[source,bash]
+----
+$ gcloud --format="value(networkInterfaces[0].accessConfigs[0].natIP)" compute instances describe node-svc-01
+----
+
+Access the application in your browser by its public IP (don't forget to specify the port 3000).
+
+=== De-provision
+
+[source,bash]
+----
+$ ../../01/deprovision.sh  #notice path
+----
+
+The script throws an error. Why?
+
+=== Save and commit the work
+
+Save and commit the packer template created in this lab into your course repo.
+
+=== Learning more about Packer
+
+Packer configuration files are called templates for a reason. They often get parameterized with https://www.packer.io/docs/templates/user-variables.html[user variables].
+This could be very helpful since you can create multiple machine images with different configurations for different purposes using one template file.
+
+Adding user variables to a template is easy, follow the https://www.packer.io/docs/templates/user-variables.html[documentation] on how to do that.
+
+
+=== Immutable infrastructure
+
+By putting everything inside the image including the application, we have achieved an https://martinfowler.com/bliki/ImmutableServer.html[immutable infrastructure].
+It is based on the idea `we build it once, and we never change it`.
+
+It has advantages of spending less time (zero in this case) on system configuration after VM's start, and prevents *configuration drift*, but it's also not easy to implement.
+
+=== Conclusion
+
+In this section you've used Packer to create a custom machine image for running your application.
+
+Its advantages include:
+
+* It requires less time and effort to configure a new VM for running the application
+* System configuration becomes more reliable. When we start a new VM to deploy the application, we know for sure that it has the right packages installed and configured properly, since we built and tested the image.
+
+== Terraform
+
+Previously, you used scripts to make your system configuration faster and more reliable.
+But we still have a lot to improve.
+
+In this section, we're going to learn about the IaC tool by HashiCorp called https://www.terraform.io/[Terraform].
+
+=== Intro
+
+Think about your current operations...
+
+Do you see any problems you may have, or any ways for improvement?
+
+Remember, that each time we want to deploy an application, we have to `provision` compute resources first, that is to start a new VM. 
+
+We do it via a `gcloud` command like this:
+
+[source,bash]
+----
+$ gcloud compute instances create node-svc \
+    --image-family ubuntu-minimal-2004-lts \
+    --boot-disk-size 10GB \
+    --machine-type f1-micro
+----
+
+At this stage, it doesn't seem like there are any problems with this. But, in fact, there are.
+
+Last week, you installed the node-svc app on two nodes, and probably noticed this was repetitive work. 
+
+Infrastructure for running your services and applications could be huge. You might have tens, hundreds or even thousands of virtual machines, hundreds of firewall rules, multiple VPC networks and load balancers. Additionally, the infrastructure could be split between multiple teams. Such infrastructure looks, and is, very complex and yet should be run and managed in a consistent and predictable way.
+
+If we create and change infrastructure components using the Web User Interface (UI) Console or even the gcloud command ine interface (CLI) tool, over time we won't be able to describe exactly in which *state* our infrastructure is in right now, meaning *we lose control over it*.
+
+This happens because you tend to forget what changes you've made a few months ago and why you made them.
+If multiple people across multiple teams are managing infrastructure, this makes things even worse.
+
+So we see here 2 clear problems:
+
+* we don't know the current state of our infrastructure
+* we can't control the changes
+
+The second problem is dealt by source control tools like `git`, while the first one is solved by using tools like Terraform. Let's find out how.
+
+=== Introducing Terraform
+
+Terraform is already installed on Google Cloud Shell.
+
+If you want to install it on a laptop or VM, you can https://www.terraform.io/downloads.html[download here].
+
+Make sure Terraform version is  \=> 0.11.0:
+
+[source,bash]
+----
+$ terraform -v
+----
+
+
+=== Describe VM instance
+
+_Terraform allows you to describe the desired state of your infrastructure and makes sure your desired state meets the actual state._
+
+Terraform uses https://www.terraform.io/docs/configuration/resources.html[*resources*] to describe different infrastructure components.
+If you want to use Terraform to manage an infrastructure component, you should first make sure there is a resource for that component for that particular platform.
+
+Let's use Terraform syntax to describe a VM instance that we want to be running.
+
+Review the Terraform configuration file called `main.tf`: it includes the following content:
+
+----
+resource "google_compute_instance" "node-svc-01" {
+  name         = "node-svc-01"
+  machine_type = "f1-micro"
+  zone         = "us-central1-c"
+
+  # boot disk specifications
+  boot_disk {
+    initialize_params {
+      image = "node-svc-base" // use image built with Packer
+    }
+  }
+
+  # networks to attach to the VM
+  network_interface {
+    network = "default"
+    access_config {} // use ephemeral public IP
+  }
+}
+----
+
+Here we use https://www.terraform.io/docs/providers/google/r/compute_instance.html[google_compute_instance] resource to manage a VM instance running in Google Cloud Platform.
+
+=== Define Resource Provider
+
+One of the advantages of Terraform over other alternatives like https://aws.amazon.com/cloudformation/?nc1=h_ls[CloudFormation] is that it's *cloud-agnostic*, meaning it can work with many different cloud providers like AWS, GCP, Azure, or OpenStack. It can also work with resources of different services like databases (e.g., PostgreSQL, MySQL), orchestrators (Kubernetes, Nomad) and https://www.terraform.io/docs/providers/[others].
+
+This means that Terraform has a pluggable architecture and the pluggable component that allows it to work with a specific platform or service is called *provider*.
+
+So before we can actually create a VM using Terraform, we need to define a configuration of a https://www.terraform.io/docs/providers/google/index.html[google cloud provider] and download it on our system.
+
+Review the `providers.tf` file and update appropriately: 
+
+----
+provider "google" {
+  version = "~> 2.5.0"
+  project = "YOU MUST PUT YOUR PROJECT NAME HERE"
+  region  = "us-central1-c"
+}
+----
+
+Make sure to change the `project` value in provider's configuration above to your project's ID. You can get your default project's ID by running the command:
+
+[source,bash]
+----
+$ gcloud config list project
+----
+
+Now run the `init` command inside `terraform` directory to download the provider:
+
+[source,bash]
+----
+$ terraform init
+[...]
+Terraform has been successfully initialized!
+[...]
+----
+
+=== Bring Infrastructure to a Desired State
+
+Once we described a desired state of the infrastructure (in our case it's a running VM), let's use Terraform to bring the infrastructure to this state:
+
+[source,bash]
+----
+$ terraform apply
+----
+
+After Terraform ran successfully, use a gcloud command to verify that the machine was indeed launched:
+
+[source,bash]
+----
+$ gcloud compute instances describe node-svc-01
+----
+
+=== Deploy Application
+
+We did provisioning via Terraform, but we still need to install and start our application using scripts. Let's do this remotely this time, instead of logging into the machine. A script has been created, `install-node-svc.sh`. It is based on `rsh` and `scp` which are ways of interacting with a remote machine from the command line. Review the script. 
+
+CRITICAL: This script MUST be launched with the "." operator, like this:
+
+[source,bash]
+----
+$ . ./install-node-svc.sh
+----
+
+NOT like this!
+
+[source,bash]
+----
+$ ./install-node-svc.sh
+----
+
+The extra period is ESSENTIAL, due to scoping issues with environment variables. (Feel free to research.)
+
+NOTE: See the FAQ if you get `Offending ECDSA key` or `Permission denied (publickey).`
+
+SWITCH TO A NEW TERMINAL TAB and connect to the VM via SSH:
+
+[source,bash]
+----
+$ NODE_IP_01=$(gcloud --format="value(networkInterfaces[0].accessConfigs[0].natIP)" compute instances describe node-svc-01) # get IP of VM
+$ ssh node-user@${NODE_IP_01}
+----
+
+Check that service is running, and then exit:
+
+[source,bash]
+----
+node-user@node-svc:~$ curl localhost:3000  
+[...] 
+node-user@node-svc:~$ exit
+----
+
+Open another terminal and run the following command to get a public IP of the VM:
+
+[source,bash]
+----
+$ gcloud --format="value(networkInterfaces[0].accessConfigs[0].natIP)" compute instances describe node-svc-01
+----
+
+Access the application in your browser by its public IP (don't forget to specify the port 3000).
+
+=== Create an output variable
+
+We have frequently used this gcloud command to retrieve a public IP address of a VM:
+
+[source,bash]
+----
+$ gcloud --format="value(networkInterfaces[0].accessConfigs[0].natIP)" compute instances describe node-svc
+----
+
+We can tell Terraform to provide us this information using https://www.terraform.io/intro/getting-started/outputs.html[output variables].
+
+Review the configuration file inside `terraform` directory called `outputs.tf`.
+Uncomment the following content in it:
+
+[source,json]
+----
+output "node_svc_public_ip" {
+  value = "${google_compute_instance.node-svc.network_interface.0.access_config.0.nat_ip}"
+}
+----
+
+Run terraform apply again, this time with auto approve:
+
+[source,bash]
+----
+$ terraform apply -auto-approve
+
+google_compute_instance.node-svc: Refreshing state... [id=node-svc]
+google_compute_firewall.node-svc: Refreshing state... [id=allow-node-svc-tcp-3000]
+google_compute_project_metadata.node-svc: Refreshing state... [id=proven-sum-252123]
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+Outputs:
+node_svc_public_ip = 34.71.90.74
+----
+
+Couple of things to notice here. First, we did not destroy anything, so terraform refreshes - it confirms that configurations are still as specified.
+
+During this Terraform run, no resources have been created or changed, which means that the actual state of our infrastructure already meets the requirements of a desired state.
+
+Secondly, under "Outputs:", you should see the public IP of the VM we created.
+
+
+== Conclusion
+
+In this section, you saw an application of Infrastructure as Code. We used _code_ (Terraform configuration syntax) to describe the _desired state_ of the infrastructure. Then we told Terraform to bring the actual state of the infrastructure to the desired state we described.
+
+With this approach, Terraform configuration becomes _a single source of truth_ about the current state of your infrastructure. Moreover, the infrastructure is described as code, so we can apply to it the same practices we commonly use in development such as keeping the code in source control, use peer reviews for making changes, etc.
+
+All of this helps us get control over even the most complex infrastructure.
+
+Destroy the resources created by Terraform and move on to the next lab.
+
+[source,bash]
+----
+$ terraform destroy -auto-approve
+----
+
+== Ansible
+
+In the previous section, you used Terraform to implement Infrastructure as Code for managing the cloud infrastructure resources. There is another major type of tooling we need to consider: *Configuration Management* (CM) tools.
+
+When talking about CM tools, we can often meet the acronym `CAPS` which stands for Chef, Ansible, Puppet and Saltstack - the most known and commonly used CM tools. In this lab, we're going to look at Ansible and see how CM tools can help us improve our operations.
+
+=== Intro
+
+If you think about our current operations and what else there is to improve, you will probably see the potential problem in the deployment process.
+
+The way we do deployment right now is by connecting via `scp`, `rsh`, and `ssh` to a VM to install and run the application. And the problem here is not the connecting via SSH part, but running a script.
+
+_Scripts are bad at long term management of system configuration, because they make common system configuration operations complex and error-prone._
+
+When you write a script, you use a scripting language syntax (Bash, Python) to write commands which you think should change the system's configuration. And the problem is that there are too many ways people can write the code that is meant to do the same things, which is the reason why scripts are often difficult to read and understand. Besides, there are various choices as to what language to use for a script: should you write it in Ruby which your colleagues know very well or Bash which you know better?
+
+Common configuration management operations are well-known: copy a file to a remote machine, create a folder, start/stop/enable a process, install packages, etc. So _we need a tool that would implement these common operations in a well-known and tested way, providing us with a clean and understandable syntax for using them_.
+
+This way we wouldn't have to write complex scripts ourselves each time for the same tasks, possibly making mistakes along the way, but instead just tell the tool what should be done: what packages should be present, what processes should be started, etc.
+
+This is exactly what CM tools do.
+So let's check it out using Ansible as an example.
+
+== Install Ansible
+
+NOTE: this lab assumes Ansible v2.4 is installed. It may not work as expected with other versions as things change quickly.
+
+Review and run the install-ansible.sh script (note that Ansible will not remain installed when your shell goes to sleep):
+
+[source,bash]
+----
+$ install-ansible.sh
+----
+
+
+Verify that Ansible was installed by checking the version:
+
+[source,bash]
+----
+$ ansible --version
+ansible 2.7.7
+[...]
+----
+
+=== Provision compute resources
+
+Start a VM and create other GCP resources for running your application applying Terraform configuration you wrote in the previous section (destroy first if you have some still running, as you want a clean install):
+
+[source,bash]
+----
+$ terraform apply -auto-approve
+----
+
+=== Deploy playbook
+
+The Bash script used for deployment is re-interpreted in the `deploy.yml` file in Ansible syntax.
+
+Ansible uses *tasks* to define commands used for system configuration. Each Ansible task basically corresponds to one command in our Bash script.
+
+Each task uses some *module* to perform a certain operation on the configured system.
+Modules are well tested functions which are meant to perform common system configuration operations.
+
+Ansible uses YAML syntax to define tasks, which makes the configuration readable.
+
+Review the file called `deploy.yml` ("deploy" including both installation and launching) in the current 02 branch.
+
+In this configuration file, which is called a *playbook* in Ansible terminology, we define several tasks.
+
+The `name` that precedes each task is used as a comment that will show up in the terminal when the task starts to run.
+
+`register` option allows to capture the result output from running a task.
+
+The first task copies the local code to the server.
+
+The second task initializes the app in the specified directory.
+
+The third task runs the server.
+
+Note, how for each module we use a different set of module options. You can find full information about the options in a module's documentation.
+
+On the same level as tasks, we also define a *handlers* block. Handlers are special tasks which are run only in response to notification events from other tasks. In our case, `node-svc` service gets restarted only when the `npm install` task is run.
+
+=== Inventory file
+
+The way that Ansible works is simple: it connects to a remote VM (usually via SSH) and runs the commands that stand behind each module you used in your playbook.
+
+To be able to connect to a remote VM, Ansible needs information like IP address and credentials.
+This information is defined in a special file called http://docs.ansible.com/ansible/latest/intro_inventory.html[inventory].
+
+Edit the file `hosts.yml` inside `ansible` to change the `ansible_host` parameter of `node-svc-01` to the public IP of your VM):
+
+[source,yaml]
+----
+node-svc-grp:
+  hosts:
+    node-svc-01:
+      ansible_host: xx.yy.xx.yy
+      ansible_user: node-user
+----
+
+Here we define a group of hosts (`node-svc-grp`) under which we list the hosts that belong to this group. For now, we enable only one host under the hosts group and give it a name (`node-svc-01`) and information on how to connect to the host.
+
+Now note, that inside our `deploy.yml` playbook we specified `node-svc` host group in the `hosts` option before the tasks:
+
+[source,yaml]
+----
+---
+- name: Deploy node-svc app
+  hosts: node-svc-01
+  tasks:
+  ...
+----
+
+This will tell Ansible to run the following tasks on the hosts defined in hosts group `node-svc`.
+
+=== Ansible configuration
+
+Before we can run a deployment, we need to make some configuration changes to how Ansible views and manages our `ansible` directory.
+
+Let's review the custom Ansible configuration for our directory. See the file called `ansible.cfg` inside the `ansible` directory with the following content:
+
+[source,ini]
+----
+[defaults]
+inventory = ./hosts.yml
+private_key_file = ~/.ssh/node-user
+host_key_checking = False
+----
+
+This custom configuration will tell Ansible what inventory file to use, what private key file to use for SSH connection and to skip the host checking key procedure.
+
+=== Run playbook
+
+Now it's time to run your playbook and see how it works.
+
+Use the following commands to start a deployment:
+
+[source,bash]
+----
+$ ansible-playbook deploy.yml
+----
+
+=== Access Application
+
+Access the application in your browser by its public IP (don't forget to specify the port 30100) and make sure application has been deployed and is functional.
+
+=== Add a node
+
+Now, using the knowledge you have, add a second server, node-svc-02, to the Terraform and Ansible files and re-apply them. 
+
+Prove your work by issuing a URL of /20 or above (e.g. http://<ip address>:30100/20) to the microservice on either machine and posting a screen shot of the output to the Canvas assignment.
+
+=== Save and commit the work
+
+Save and commit the `ansible` folder created in this lab into your course repo.
+
+=== Idempotence
+
+One more advantage of CM tools over scripts is that commands they implement designed to be *idempotent* by default.
+
+Idempotence in this case means that even if you apply the same configuration changes multiple times the result will stay the same.
+
+This is important because some commands that you use in scripts may not produce the same results when run more than once. So we always want to achieve idempotence for our configuration management system, sometimes applying conditionals statements as we did in this lab.
+
+=== Conclusion
+
+Ansible provided us with a clean YAML syntax for performing common system configuration tasks. This allowed us to get rid of our own implementation of configuration commands.
+
+It might not seem like a big improvement at this scale, because our deploy script is small, but it definitely brings order to system configuration management and is more noticeable at medium and large scale.
+
+Destroy the resources created by Terraform.
+
+
+
+
+
+
+
+
